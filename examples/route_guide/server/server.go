@@ -25,6 +25,9 @@
 package main
 
 import (
+	ctxt "context"
+	cryptotls "crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -33,10 +36,12 @@ import (
 	"log"
 	"math"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
 	"golang.org/x/net/context"
+	_ "golang.org/x/net/trace"
 	"google.golang.org/grpc"
 
 	"google.golang.org/grpc/credentials"
@@ -48,11 +53,12 @@ import (
 )
 
 var (
-	tls        = flag.Bool("tls", false, "Connection uses TLS if true, else plain TCP")
-	certFile   = flag.String("cert_file", "", "The TLS cert file")
-	keyFile    = flag.String("key_file", "", "The TLS key file")
-	jsonDBFile = flag.String("json_db_file", "testdata/route_guide_db.json", "A json file containing a list of features")
-	port       = flag.Int("port", 10000, "The server port")
+	tls          = flag.Bool("tls", false, "Connection uses TLS if true, else plain TCP")
+	certFile     = flag.String("cert_file", "", "The TLS cert file")
+	keyFile      = flag.String("key_file", "", "The TLS key file")
+	clientCAFile = flag.String("client_ca_file", "", "Client CA file")
+	jsonDBFile   = flag.String("json_db_file", "testdata/route_guide_db.json", "A json file containing a list of features")
+	port         = flag.Int("port", 10000, "The server port")
 )
 
 type routeGuideServer struct {
@@ -213,8 +219,22 @@ func newServer() *routeGuideServer {
 }
 
 func main() {
+	log.Println("Enabled grpc tracing")
+	grpc.EnableTracing = true
+	debugServer := &http.Server{Addr: "0.0.0.0:6000", Handler: nil}
+	go func() {
+		log.Println("Listening for debug events")
+		err := debugServer.ListenAndServe()
+		if err != nil {
+			log.Println("Error while serving HTTP: ", err)
+		}
+	}()
+
+	ctx, _ := ctxt.WithTimeout(ctxt.Background(), 5*time.Second)
+	defer debugServer.Shutdown(ctx)
+
 	flag.Parse()
-	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", *port))
+	lis, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", *port))
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
@@ -226,12 +246,25 @@ func main() {
 		if *keyFile == "" {
 			*keyFile = testdata.Path("server1.key")
 		}
-		creds, err := credentials.NewServerTLSFromFile(*certFile, *keyFile)
+		cert, err := cryptotls.LoadX509KeyPair(*certFile, *keyFile)
 		if err != nil {
-			log.Fatalf("Failed to generate credentials %v", err)
+			log.Fatalf("Could not load cert files")
 		}
+		tlsConfig := cryptotls.Config{Certificates: []cryptotls.Certificate{cert}}
+		if *clientCAFile != "" {
+			data, err := ioutil.ReadFile(*clientCAFile)
+			if err != nil {
+				log.Fatal(err)
+			}
+			pool := x509.NewCertPool()
+			pool.AppendCertsFromPEM(data)
+
+			tlsConfig.ClientCAs = pool
+		}
+		creds := credentials.NewTLS(&tlsConfig)
 		opts = []grpc.ServerOption{grpc.Creds(creds)}
 	}
+	log.Println("Started grpc server")
 	grpcServer := grpc.NewServer(opts...)
 	pb.RegisterRouteGuideServer(grpcServer, newServer())
 	grpcServer.Serve(lis)

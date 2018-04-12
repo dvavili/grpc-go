@@ -29,6 +29,7 @@ import (
 	"math/rand"
 	"time"
 
+	"crypto/x509"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -41,6 +42,7 @@ var (
 	caFile             = flag.String("ca_file", "", "The file containning the CA root cert file")
 	serverAddr         = flag.String("server_addr", "127.0.0.1:10000", "The server address in the format of host:port")
 	serverHostOverride = flag.String("server_host_override", "x.test.youtube.com", "The server name use to verify the hostname returned by TLS handshake")
+	useSystemCerts     = flag.Bool("use_system_certs", false, "Uses system certs to verify conenctions")
 )
 
 // printFeature gets the feature for the given point.
@@ -154,12 +156,22 @@ func main() {
 	flag.Parse()
 	var opts []grpc.DialOption
 	if *tls {
-		if *caFile == "" {
-			*caFile = testdata.Path("ca.pem")
-		}
-		creds, err := credentials.NewClientTLSFromFile(*caFile, *serverHostOverride)
-		if err != nil {
-			log.Fatalf("Failed to create TLS credentials %v", err)
+		var creds credentials.TransportCredentials
+		var err error
+		if *useSystemCerts {
+			cp, err := x509.SystemCertPool()
+			if err != nil {
+				log.Fatalf("Failed loading system cert pool")
+			}
+			creds = credentials.NewClientTLSFromCert(cp, *serverHostOverride)
+		} else {
+			if *caFile == "" {
+				*caFile = testdata.Path("ca.pem")
+			}
+			creds, err = credentials.NewClientTLSFromFile(*caFile, *serverHostOverride)
+			if err != nil {
+				log.Fatalf("Failed to create TLS credentials %v", err)
+			}
 		}
 		opts = append(opts, grpc.WithTransportCredentials(creds))
 	} else {
